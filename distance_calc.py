@@ -14,7 +14,8 @@ processor = AutoProcessor.from_pretrained("google/owlv2-base-patch16-ensemble")
 model = Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble")
 
 
-# Sub-functions
+# ---------------- Helper Functions ---------------- #
+
 def calculate_distance(H_real, H_pixels, image_width, camera_field_of_view_degrees):
     camera_field_of_view_radians = math.radians(camera_field_of_view_degrees)
     focal_length_pixels = (0.5 * image_width) / math.tan(0.5 * camera_field_of_view_radians)
@@ -22,21 +23,24 @@ def calculate_distance(H_real, H_pixels, image_width, camera_field_of_view_degre
     return distance_meters
 
 
-def plot_box_on_image(image, box, title=""):
-    # fig, ax = plt.subplots()
-    # ax.imshow(image)
-    # x_min, y_min, x_max, y_max = box
-    # ax.plot([x_min, x_max, x_max, x_min, x_min],
-    #         [y_min, y_min, y_max, y_max, y_min], 'r-')
-    # ax.set_title(title)
-    # plt.show()
+def compute_elevation_angle(y_flag_base, image_height, fov_vertical):
+    """Estimate slope angle (degrees) from flag base position."""
+    pixel_offset = (image_height / 2) - y_flag_base  # positive if base is above center
+    theta = (fov_vertical * pixel_offset / image_height)
+    return theta
 
+
+def effective_distance(distance, theta_deg):
+    """Adjust distance based on elevation angle (degrees)."""
+    return distance * math.cos(math.radians(theta_deg))
+
+
+def plot_box_on_image(image, box, title=""):
     draw = ImageDraw.Draw(image)
     x_min, y_min, x_max, y_max = box
     draw.rectangle([x_min, y_min, x_max, y_max], outline="red", width=3)
+    draw.text((x_min, y_min - 10), title, fill="red")
     return image
-
-
 
 
 def get_box_with_highest_confidence(boxes, scores):
@@ -59,10 +63,11 @@ def preprocess_image_for_model(image):
     return Image.fromarray(unnormalized_image)
 
 
-# Main function for Gradio
+# ---------------- Main Gradio Function ---------------- #
+
 def process_golf_pin(image, pin_height_meters, camera_fov):
     image = Image.fromarray(image)
-    camera_fov = int(camera_fov)
+    camera_fov = float(camera_fov)
     pin_height_meters = float(pin_height_meters)
 
     iphone_image_width_pixels, iphone_image_height_pixels = image.size
@@ -84,7 +89,20 @@ def process_golf_pin(image, pin_height_meters, camera_fov):
     normalized_flag_height = best["height"]
     flag_height_pixels = iphone_image_height_pixels * normalized_flag_height / normalized_image.height
 
+    # Step 1: Standard distance
     distance = calculate_distance(pin_height_meters, flag_height_pixels, iphone_image_width_pixels, camera_fov)
-    image_with_box = plot_box_on_image(normalized_image, best["coordinates"], title=f"Distance: {distance:.2f} meters")
 
-    return image_with_box, f"Distance to pin: {distance:.2f} meters"
+    # Step 2: Estimate slope angle from flag base
+    y_flag_base = best["coordinates"][3]  # y_max of box
+    theta = compute_elevation_angle(y_flag_base, iphone_image_height_pixels, camera_fov)
+
+    # Step 3: Adjust for effective distance
+    effective = effective_distance(distance, theta)
+
+    image_with_box = plot_box_on_image(
+        normalized_image,
+        best["coordinates"],
+        title=f"Distance: {effective:.2f} m ({'uphill' if theta>0 else 'downhill' if theta<0 else 'flat'}, {theta:.1f}°)"
+    )
+
+    return image_with_box, f"Line of sight: {distance:.2f} m | Effective: {effective:.2f} m | Angle: {theta:.1f}°"
